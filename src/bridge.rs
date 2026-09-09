@@ -337,7 +337,7 @@ fn open_in_nvim(
 /// already loaded in the daemon regardless, so a focus failure is non-fatal.
 fn focus_pane(pane: &str) {
     let result = Command::new("herdr")
-        .args(["agent", "focus", pane])
+        .args(["plugin", "pane", "focus", pane])
         .status();
     match result {
         Ok(status) if status.success() => {}
