@@ -12,6 +12,7 @@ mod maneuver;
 mod openlink;
 mod picker;
 mod sessions;
+mod sidebar_lock;
 mod state;
 
 fn main() {

@@ -494,10 +494,24 @@ pub struct MockHerdr {
     pub pane_cwd_results: VecDeque<Result<PathBuf>>,
     pub agents_results: VecDeque<Result<Vec<AgentInfo>>>,
     pub pane_snapshot_results: VecDeque<Result<PaneSnapshot>>,
+    /// Read once at each layout-changing step, and the answers collected in
+    /// `probed`. A caller's effect on process-wide state -- a lock that is
+    /// meant to be held only while a maneuver is in flight, say -- is
+    /// invisible after the call returns, because the guard that holds it is
+    /// already dropped. This is how a test looks at that state from inside
+    /// the maneuver instead.
+    pub probe: Option<fn(&str) -> String>,
+    pub probed: Vec<String>,
 }
 
 #[cfg(test)]
 impl MockHerdr {
+    fn probe(&mut self, step: &str) {
+        if let Some(probe) = self.probe {
+            self.probed.push(probe(step));
+        }
+    }
+
     fn next<T>(queue: &mut VecDeque<Result<T>>, operation: &str) -> Result<T> {
         queue
             .pop_front()
@@ -518,6 +532,7 @@ impl Herdr for MockHerdr {
     }
 
     fn create_tab(&mut self, workspace: &str) -> Result<(String, String)> {
+        self.probe("create_tab");
         self.ops.push(format!("create_tab {workspace}"));
         Self::next(&mut self.create_tab_results, "create_tab")
     }
@@ -553,6 +568,7 @@ impl Herdr for MockHerdr {
         cwd: &Path,
         focus: bool,
     ) -> Result<String> {
+        self.probe("open_sidebar");
         self.ops.push(format!(
             "open_sidebar {anchor} dir:{dir:?} cwd:{} focus:{focus}",
             cwd.display()

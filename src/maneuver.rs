@@ -74,6 +74,11 @@ fn cwd_from_context(context: &Value) -> Option<PathBuf> {
 }
 
 pub fn toggle(h: &mut dyn Herdr, ctx: &Ctx) -> Result<()> {
+    // Everything below rearranges the tab, and `open()` does it in stages that
+    // leave the tab without its file explorer for a moment. herdr-sidebar
+    // would dock a second one into that gap. See `sidebar_lock`.
+    let _sidebar_hook = crate::sidebar_lock::hold();
+
     // Opportunistic, best-effort gc: reap stale per-tab daemons left behind by
     // closed tabs. Non-fatal -- a gc failure must never block a toggle.
     let config = crate::config::load();
@@ -471,6 +476,30 @@ mod tests {
         ));
         let _guard = StateDirGuard::new(dir);
         test();
+    }
+
+    #[test]
+    fn toggle_holds_the_sidebar_hook_lock_while_it_rearranges_the_tab() {
+        with_state_dir(|| {
+            let mut h = mock_3pane();
+            // The lock is released before toggle() returns, so it can only be
+            // observed from inside the maneuver. See `MockHerdr::probe`.
+            h.probe = Some(|_| crate::sidebar_lock::lock_dir().is_dir().to_string());
+
+            toggle(&mut h, &ctx()).unwrap();
+
+            assert_eq!(
+                h.probed,
+                vec!["true".to_string(), "true".to_string()],
+                "the lock must be held at both steps herdr-sidebar's hooks \
+                 react to: the parking tab's creation (tab.created) and the \
+                 sidebar pane's creation with focus (pane.focused)"
+            );
+            assert!(
+                !crate::sidebar_lock::lock_dir().is_dir(),
+                "the lock must be released once the maneuver is over"
+            );
+        });
     }
 
     #[test]
