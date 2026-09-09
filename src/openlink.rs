@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::{
     bridge,
@@ -164,6 +164,10 @@ pub fn open_link_cmd() -> Result<()> {
 /// resolution. Takes `<path> [<line>]` as argv and `HERDR_PANE_ID`/
 /// `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID` from the environment, same as
 /// `open-link`'s click env minus `HERDR_PLUGIN_CLICKED_URL`.
+///
+/// Unlike `open-link`, a bad argument here is an error, not a silent no-op:
+/// the caller is a program that passed an explicit path, not a user who
+/// mis-clicked.
 pub fn open_file_cmd() -> Result<()> {
     let mut args = env::args().skip(2);
     let Some(path) = args.next() else {
@@ -171,6 +175,17 @@ pub fn open_file_cmd() -> Result<()> {
         return Ok(());
     };
     let line = args.next().and_then(|s| s.parse::<u32>().ok());
+
+    // Check the path before any side effect. `open-link` gets the same
+    // guarantee from `resolve_click`'s `is_file` probe below. Two reasons it
+    // has to happen first: the daemon spawn and the tab relayout further down
+    // are not undoable, and `nvim --server S --remote <missing>` exits 0 with
+    // an empty phantom buffer -- so without this, a bad path is indis-
+    // tinguishable from a good one, and a later `:w` writes the file back as
+    // empty.
+    if !Path::new(&path).is_file() {
+        bail!("not a file: {path}");
+    }
 
     let pane = env::var("HERDR_PANE_ID").context("HERDR_PANE_ID is not set")?;
     let workspace = env::var("HERDR_WORKSPACE_ID").context("HERDR_WORKSPACE_ID is not set")?;
