@@ -24,9 +24,10 @@ fn main() {
         "pick-file" => run(bridge::pick_file_cmd),
         "picker" => run(picker::picker_cmd),
         "open-link" => run(openlink::open_link_cmd),
+        "open-file" => run(openlink::open_file_cmd),
         _ => {
             eprintln!(
-                "usage: herdr-nvim <toggle|sidebar|daemon-gc|doctor|pick-file|picker|open-link>"
+                "usage: herdr-nvim <toggle|sidebar|daemon-gc|doctor|pick-file|picker|open-link|open-file>"
             );
             2
         }

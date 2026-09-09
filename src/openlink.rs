@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::{
     bridge,
@@ -156,6 +156,35 @@ pub fn open_link_cmd() -> Result<()> {
         cwd: cwd.clone(),
     };
     bridge::open_in_sidebar(&mut herdr, &ctx, &resolved.to_string_lossy(), line)
+}
+
+/// Entry point for the `open-file` subcommand — like `open-link`, but for a
+/// caller (e.g. another plugin's own file tree) that already has a resolved
+/// absolute path and doesn't need click-text parsing or cwd-relative
+/// resolution. Takes `<path> [<line>]` as argv and `HERDR_PANE_ID`/
+/// `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID` from the environment, same as
+/// `open-link`'s click env minus `HERDR_PLUGIN_CLICKED_URL`.
+pub fn open_file_cmd() -> Result<()> {
+    let mut args = env::args().skip(2);
+    let Some(path) = args.next() else {
+        eprintln!("usage: herdr-nvim open-file <path> [<line>]");
+        return Ok(());
+    };
+    let line = args.next().and_then(|s| s.parse::<u32>().ok());
+
+    let pane = env::var("HERDR_PANE_ID").context("HERDR_PANE_ID is not set")?;
+    let workspace = env::var("HERDR_WORKSPACE_ID").context("HERDR_WORKSPACE_ID is not set")?;
+    let tab = env::var("HERDR_TAB_ID").context("HERDR_TAB_ID is not set")?;
+
+    let mut herdr = CliHerdr;
+    let cwd = herdr.pane_cwd(&pane)?;
+    let ctx = Ctx {
+        workspace,
+        tab,
+        focused_pane: pane,
+        cwd,
+    };
+    bridge::open_in_sidebar(&mut herdr, &ctx, &path, line)
 }
 
 #[cfg(test)]
