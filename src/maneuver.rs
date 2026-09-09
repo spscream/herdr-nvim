@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::{
@@ -212,6 +212,41 @@ fn open(h: &mut dyn Herdr, ctx: &Ctx, position: SidebarPosition) -> Result<()> {
     state::save(&state_file)
 }
 
+/// Put one parked pane back into `tab`, tolerating a layout that changed while
+/// it was away.
+///
+/// Two panes can vanish between the plan and this replay: the pane itself
+/// (something closed it while it sat on the parking tab) and the sibling it
+/// was to be placed against. Neither is worth failing over. A pane that no
+/// longer exists needs no home, and a lost sibling costs the exact position,
+/// not the pane -- herdr's default placement still beats leaving it on a
+/// parking tab the user cannot see.
+///
+/// Both cases used to surface as `pane_not_found` from `move_pane` and abort
+/// `recover`, which left the state file in `Evacuating` for good: every later
+/// open replayed the same dead plan and failed the same way, so the tab's
+/// sidebar stayed broken until someone deleted the journal by hand.
+///
+/// Returns whether the pane was still there to move.
+fn restore_parked(
+    h: &mut dyn Herdr,
+    tab: &str,
+    pane: &str,
+    placement: Option<(Dir, &str, f64)>,
+) -> Result<bool> {
+    if !h.pane_alive(pane)? {
+        return Ok(false);
+    }
+    if let Some((dir, target, ratio)) = placement {
+        if h.pane_alive(target)? {
+            h.move_pane(pane, tab, dir, Some(target), Some(ratio), false)?;
+            return Ok(true);
+        }
+    }
+    h.move_pane(pane, tab, Dir::Right, None, None, false)?;
+    Ok(true)
+}
+
 pub fn recover(h: &mut dyn Herdr, tab: &str) -> Result<()> {
     let Some(mut state_file) = state::load(tab)? else {
         return Ok(());
@@ -230,21 +265,27 @@ pub fn recover(h: &mut dyn Herdr, tab: &str) -> Result<()> {
         if !state_file.parked.iter().any(|pane| pane == &step.pane) {
             continue;
         }
-        h.move_pane(
-            &step.pane,
+        restore_parked(
+            h,
             &state_file.tab,
-            step.dir,
-            Some(&step.target),
-            Some(step.ratio),
-            false,
+            &step.pane,
+            Some((step.dir, &step.target, step.ratio)),
         )?;
         state_file.parked.retain(|pane| pane != &step.pane);
         state::save(&state_file)?;
     }
 
-    if let Some(pane) = state_file.parked.first() {
-        bail!("recovery state contains parked pane {pane} without a rebuild step");
+    // A parked pane the plan does not mention still has to leave the parking
+    // tab. This was a hard error, on the reading that it could only mean a
+    // corrupt state file. It also happens whenever the plan and the parked
+    // list come from different versions of this code, and failing here wedges
+    // the tab exactly like a dead pane did.
+    for pane in state_file.parked.clone() {
+        restore_parked(h, &state_file.tab, &pane, None)?;
+        state_file.parked.retain(|parked| parked != &pane);
+        state::save(&state_file)?;
     }
+
     state::remove(tab)
 }
 
@@ -559,7 +600,9 @@ mod tests {
             state::save(&checkpoint).unwrap();
 
             let mut h = mock_3pane();
-            h.pane_alive_results.push_back(Ok(true));
+            for _ in 0..5 {
+                h.pane_alive_results.push_back(Ok(true));
+            }
 
             toggle(&mut h, &ctx()).unwrap();
 
@@ -610,11 +653,18 @@ mod tests {
         with_state_dir(|| {
             state::save(&evacuating_state()).unwrap();
             let mut h = MockHerdr::default();
+            for _ in 0..4 {
+                h.pane_alive_results.push_back(Ok(true));
+            }
             recover(&mut h, "wT:t1").unwrap();
             assert_eq!(
                 h.ops,
                 vec![
+                    "alive wT:p2",
+                    "alive wT:p1",
                     "move wT:p2 -> tab:wT:t1 dir:Right target:wT:p1 ratio:0.4 focus:false",
+                    "alive wT:p3",
+                    "alive wT:p2",
                     "move wT:p3 -> tab:wT:t1 dir:Down target:wT:p2 ratio:0.3 focus:false",
                 ]
             );
@@ -629,7 +679,13 @@ mod tests {
             saved_state.sidebar_pane = Some("wT:p99".into());
             state::save(&saved_state).unwrap();
             let mut h = MockHerdr {
-                pane_alive_results: VecDeque::from([Ok(true)]),
+                pane_alive_results: VecDeque::from([
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                ]),
                 ..Default::default()
             };
 
@@ -640,7 +696,11 @@ mod tests {
                 vec![
                     "alive wT:p99",
                     "close wT:p99",
+                    "alive wT:p2",
+                    "alive wT:p1",
                     "move wT:p2 -> tab:wT:t1 dir:Right target:wT:p1 ratio:0.4 focus:false",
+                    "alive wT:p3",
+                    "alive wT:p2",
                     "move wT:p3 -> tab:wT:t1 dir:Down target:wT:p2 ratio:0.3 focus:false",
                 ]
             );
@@ -655,7 +715,13 @@ mod tests {
             saved_state.sidebar_pane = Some("wT:p99".into());
             state::save(&saved_state).unwrap();
             let mut h = MockHerdr {
-                pane_alive_results: VecDeque::from([Ok(false)]),
+                pane_alive_results: VecDeque::from([
+                    Ok(false),
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                    Ok(true),
+                ]),
                 ..Default::default()
             };
 
@@ -665,7 +731,11 @@ mod tests {
                 h.ops,
                 vec![
                     "alive wT:p99",
+                    "alive wT:p2",
+                    "alive wT:p1",
                     "move wT:p2 -> tab:wT:t1 dir:Right target:wT:p1 ratio:0.4 focus:false",
+                    "alive wT:p3",
+                    "alive wT:p2",
                     "move wT:p3 -> tab:wT:t1 dir:Down target:wT:p2 ratio:0.3 focus:false",
                 ]
             );
@@ -756,5 +826,103 @@ mod tests {
         let ctx = read_ctx(&mut h).unwrap();
         assert_eq!(ctx.cwd, PathBuf::from("/repo/from-cli"));
         assert_eq!(h.ops, vec!["pane_cwd wA:p1"]);
+    }
+    #[test]
+    fn recover_forgets_a_parked_pane_that_no_longer_exists() {
+        // The wedge this fixes: something closed a pane while it sat on the
+        // parking tab, so the replay named a pane herdr no longer knew. The
+        // move failed, recover() aborted, and the state file stayed in
+        // Evacuating -- every later open replayed the same dead plan, so the
+        // tab's sidebar never came back until the journal was deleted by hand.
+        with_state_dir(|| {
+            state::save(&evacuating_state()).unwrap();
+
+            let mut h = MockHerdr::default();
+            h.pane_alive_results.push_back(Ok(false)); // p2 is gone
+            h.pane_alive_results.push_back(Ok(true)); // p3 is still there
+            h.pane_alive_results.push_back(Ok(false)); // ... but its sibling p2 is not
+
+            recover(&mut h, "wT:t1").unwrap();
+
+            assert_eq!(
+                h.ops,
+                vec![
+                    "alive wT:p2",
+                    "alive wT:p3",
+                    "alive wT:p2",
+                    // No sibling left to place against, so p3 goes back at
+                    // herdr's default position rather than staying parked.
+                    "move wT:p3 -> tab:wT:t1 dir:Right target:- ratio:- focus:false",
+                ]
+            );
+            assert!(
+                state::load("wT:t1").unwrap().is_none(),
+                "a dead pane must not leave the tab wedged in Evacuating"
+            );
+        });
+    }
+
+    #[test]
+    fn recover_restores_a_parked_pane_the_plan_forgot() {
+        // Previously a hard error (`bail!`), which wedged the tab just as
+        // badly as a dead pane. The pane still has to leave the parking tab.
+        with_state_dir(|| {
+            let mut stranded = evacuating_state();
+            stranded.parked.push("wT:pX".into());
+            state::save(&stranded).unwrap();
+
+            let mut h = MockHerdr::default();
+            for _ in 0..5 {
+                h.pane_alive_results.push_back(Ok(true));
+            }
+
+            recover(&mut h, "wT:t1").unwrap();
+
+            assert_eq!(
+                h.ops.last().map(String::as_str),
+                Some("move wT:pX -> tab:wT:t1 dir:Right target:- ratio:- focus:false"),
+                "the pane the plan forgot must still come home: {:?}",
+                h.ops
+            );
+            assert!(state::load("wT:t1").unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn open_file_recovers_a_tab_whose_parked_panes_all_died() {
+        // The end-to-end shape of the reported bug: `open-file` reaches this
+        // through bridge::ensure_sidebar_open -> toggle -> recover. With both
+        // parked panes gone, recovery must still finish and let open() build a
+        // fresh sidebar instead of failing every click from then on.
+        with_state_dir(|| {
+            state::save(&evacuating_state()).unwrap();
+
+            let mut h = mock_3pane();
+            h.pane_alive_results.push_back(Ok(false));
+            h.pane_alive_results.push_back(Ok(false));
+
+            toggle(&mut h, &ctx()).unwrap();
+
+            // Recovery runs before open(), so everything up to `create_tab` is
+            // recovery's doing. It must not have tried to move either dead
+            // pane -- that move is what used to fail and wedge the tab. The
+            // moves after `create_tab` belong to open()'s own fresh plan and
+            // are expected.
+            let opened = h
+                .ops
+                .iter()
+                .position(|op| op == "create_tab wT")
+                .expect("toggle must fall through to a fresh open()");
+            assert!(
+                h.ops[..opened].iter().all(|op| !op.starts_with("move ")),
+                "recovery must not move panes that no longer exist: {:?}",
+                &h.ops[..opened]
+            );
+
+            let state = state::load("wT:t1").unwrap().unwrap();
+            assert!(matches!(state.phase, Phase::Open));
+            assert!(state.parked.is_empty());
+            assert_eq!(state.sidebar_pane.as_deref(), Some("wT:p99"));
+        });
     }
 }
