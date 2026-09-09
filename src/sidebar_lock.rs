@@ -62,7 +62,15 @@ impl Drop for Guard {
     }
 }
 
+/// Set by a caller that already holds the lock itself, so this process does
+/// not wait out its own guard. herdr-sidebar sets it when it drives an
+/// `open-file` from inside its own locked section.
+const ALREADY_HELD: &str = "HERDR_SIDEBAR_ENSURE_LOCK_HELD";
+
 pub fn hold() -> Guard {
+    if std::env::var_os(ALREADY_HELD).is_some() {
+        return Guard(None);
+    }
     hold_in(lock_dir(), WAIT, STALE_AFTER)
 }
 
@@ -129,6 +137,29 @@ mod tests {
             dir.is_dir(),
             "a guard that never took the lock must not release it"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_caller_that_already_holds_the_lock_is_not_made_to_wait_for_itself() {
+        let dir = scratch("reentrant");
+        std::fs::create_dir_all(&dir).unwrap();
+        // `hold()` reads the real path, so prove the env check short-circuits
+        // before any filesystem work by making the real lock unavailable.
+        let real = lock_dir();
+        let taken = std::fs::create_dir(&real).is_ok();
+        unsafe { std::env::set_var(ALREADY_HELD, "1") };
+        let guard = hold();
+        assert!(
+            guard.0.is_none(),
+            "a caller holding the lock must get a guard that releases nothing"
+        );
+        unsafe { std::env::remove_var(ALREADY_HELD) };
+        drop(guard);
+        if taken {
+            assert!(real.is_dir(), "the caller's own lock must survive");
+            let _ = std::fs::remove_dir(&real);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
