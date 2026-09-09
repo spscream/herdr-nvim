@@ -18,7 +18,7 @@ use std::{
     env,
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -323,6 +323,11 @@ fn open_in_nvim(
             .arg("--server")
             .arg(socket)
             .arg("--remote-expr")
+            // `--remote-expr` prints the expression's value. `cursor()` returns
+            // 0, and that 0 would land on whatever terminal this process
+            // inherited -- an agent pane for `open-link`, a TUI's screen buffer
+            // for `open-file`. Nobody reads it, so drop it.
+            .stdout(Stdio::null())
             .arg(format!("cursor({line}, 1)"))
             .status()
             .context("failed to run nvim --server --remote-expr")?;
@@ -338,6 +343,10 @@ fn open_in_nvim(
 fn focus_pane(pane: &str) {
     let result = Command::new("herdr")
         .args(["plugin", "pane", "focus", pane])
+        // `herdr` answers on stdout with a JSON result object. The exit code
+        // already carries everything this function reads, and the JSON would
+        // otherwise be written over whatever terminal the caller inherited.
+        .stdout(Stdio::null())
         .status();
     match result {
         Ok(status) if status.success() => {}
